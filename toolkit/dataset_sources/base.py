@@ -34,6 +34,8 @@ class SettingField:
     description: str = ""
     # Placeholder text inside the input
     placeholder: str = ""
+    # Whether this setting must be non-empty for the plugin to be considered configured
+    required: bool = True
 
 
 @dataclass
@@ -83,6 +85,9 @@ class RemoteDatasetSource(ABC):
 
     # Human-readable name shown in the UI, e.g. "PixlStash"
     display_name: str = ""
+
+    # Optional absolute path to an icon image (PNG/SVG) shown in the UI
+    icon_path: Optional[str] = None
 
     def __init__(self, settings: dict) -> None:
         """
@@ -164,3 +169,12 @@ class RemoteDatasetSource(ABC):
 
     def get_setting(self, key: str, default: str = "") -> str:
         return self.settings.get(key, default)
+
+    @classmethod
+    def is_configured(cls, settings: dict) -> bool:
+        """Return True if all required settings have non-empty values."""
+        return all(
+            settings.get(f.key, "").strip()
+            for f in cls.get_settings_schema()
+            if f.required
+        )

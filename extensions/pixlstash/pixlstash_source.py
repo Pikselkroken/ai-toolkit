@@ -24,6 +24,7 @@ from toolkit.dataset_sources.base import (
 class PixlStashDatasetSource(RemoteDatasetSource):
     type_id = "pixlstash"
     display_name = "PixlStash"
+    icon_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
 
     # Settings keys stored in the AI-Toolkit DB
     SETTING_URL = "PIXLSTASH_URL"
@@ -54,6 +55,7 @@ class PixlStashDatasetSource(RemoteDatasetSource):
                 input_type="checkbox",
                 description="Uncheck to allow self-signed certificates (e.g. local HTTPS).",
                 placeholder="",
+                required=False,
             ),
         ]
 

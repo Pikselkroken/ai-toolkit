@@ -17,6 +17,7 @@ import { useRouter } from 'next/navigation';
 interface RemotePlugin {
   id: string;
   display_name: string;
+  icon?: string;
 }
 
 export default function Datasets() {
@@ -139,9 +140,12 @@ export default function Datasets() {
           {plugins.map(plugin => (
             <Button
               key={plugin.id}
-              className="text-gray-200 bg-indigo-700 px-4 py-2 rounded-md hover:bg-indigo-600 transition-colors"
+              className="text-gray-200 bg-indigo-700 px-4 py-2 rounded-md hover:bg-indigo-600 transition-colors flex items-center gap-2"
               onClick={() => setOpenPluginId(plugin.id)}
             >
+              {plugin.icon && (
+                <img src={plugin.icon} alt="" className="w-4 h-4 object-contain flex-shrink-0" />
+              )}
               Browse {plugin.display_name}
             </Button>
           ))}

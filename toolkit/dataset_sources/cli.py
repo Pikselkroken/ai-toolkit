@@ -50,18 +50,37 @@ def _load_extensions() -> None:
 
 
 def cmd_plugins() -> None:
+    import base64
     import dataclasses
-    from toolkit.dataset_sources.registry import get_all_sources
+    from toolkit.dataset_sources.registry import get_all_sources, load_settings_from_db
+    from toolkit.paths import TOOLKIT_ROOT
+
+    db_path = os.path.join(TOOLKIT_ROOT, "aitk_db.db")
+    settings = load_settings_from_db(db_path)
+
+    def _icon_data_url(cls) -> str | None:
+        if not cls.icon_path:
+            return None
+        try:
+            with open(cls.icon_path, "rb") as f:
+                data = base64.b64encode(f.read()).decode()
+            ext = os.path.splitext(cls.icon_path)[1].lower()
+            mime = {'.png': 'image/png', '.svg': 'image/svg+xml', '.jpg': 'image/jpeg'}.get(ext, 'image/png')
+            return f"data:{mime};base64,{data}"
+        except Exception:
+            return None
 
     out = [
         {
             "id": cls.type_id,
             "display_name": cls.display_name,
+            "icon": _icon_data_url(cls),
             "settings_schema": [
                 dataclasses.asdict(f) for f in cls.get_settings_schema()
             ],
         }
         for cls in get_all_sources()
+        if cls.is_configured(settings)
     ]
     print(json.dumps(out))
 
