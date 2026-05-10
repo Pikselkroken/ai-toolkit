@@ -29,6 +29,8 @@ class PixlStashDatasetSource(RemoteDatasetSource):
     SETTING_URL = "PIXLSTASH_URL"
     SETTING_TOKEN = "PIXLSTASH_TOKEN"
 
+    SETTING_VERIFY_SSL = "PIXLSTASH_VERIFY_SSL"
+
     @classmethod
     def get_settings_schema(cls) -> List[SettingField]:
         return [
@@ -46,6 +48,13 @@ class PixlStashDatasetSource(RemoteDatasetSource):
                 description="Create a token in PixlStash → Settings → API Tokens.",
                 placeholder="Paste your API token here",
             ),
+            SettingField(
+                key=cls.SETTING_VERIFY_SSL,
+                label="Verify SSL Certificate",
+                input_type="checkbox",
+                description="Uncheck to allow self-signed certificates (e.g. local HTTPS).",
+                placeholder="",
+            ),
         ]
 
     # ------------------------------------------------------------------
@@ -53,7 +62,10 @@ class PixlStashDatasetSource(RemoteDatasetSource):
     # ------------------------------------------------------------------
 
     def _make_client(self):
-        from extensions.pixlstash.pixlstash_client import PixlStashClient, PixlStashError
+        from extensions.pixlstash.pixlstash_client import (
+            PixlStashClient,
+            PixlStashError,
+        )
 
         url = self.get_setting(self.SETTING_URL)
         token = self.get_setting(self.SETTING_TOKEN)
@@ -62,7 +74,10 @@ class PixlStashDatasetSource(RemoteDatasetSource):
                 "PixlStash URL and API token must be set in AI-Toolkit Settings "
                 "before using a PixlStash dataset source."
             )
-        client = PixlStashClient(url, token)
+        verify_ssl = self.get_setting(
+            self.SETTING_VERIFY_SSL, default="true"
+        ).lower() not in ("false", "0", "no", "off")
+        client = PixlStashClient(url, token, verify_ssl=verify_ssl)
         client.login()
         return client
 
@@ -87,10 +102,13 @@ class PixlStashDatasetSource(RemoteDatasetSource):
     # ------------------------------------------------------------------
 
     def build_job_config(self, params: dict) -> dict:
+        verify_ssl_raw = self.get_setting(self.SETTING_VERIFY_SSL, default="true")
+        verify_ssl = verify_ssl_raw.lower() not in ("false", "0", "no", "off")
         cfg = {
-            "type": "extensions/pixlstash/PixlStashFetchProcess",
+            "type": "pixlstash_fetch",
             "pixlstash_url": self.get_setting(self.SETTING_URL),
             "pixlstash_token": self.get_setting(self.SETTING_TOKEN),
+            "verify_ssl": verify_ssl,
             "source_type": params["source_type"],
             "source_id": int(params["source_id"]),
             "caption_mode": params.get("caption_mode", "description"),
@@ -172,4 +190,3 @@ class PixlStashDatasetSource(RemoteDatasetSource):
                 default=0,
             ),
         ]
-

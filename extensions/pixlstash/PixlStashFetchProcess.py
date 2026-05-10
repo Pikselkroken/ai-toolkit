@@ -65,6 +65,9 @@ class PixlStashFetchProcess(BaseExtensionProcess):
         self.dataset_name: str | None = self.get_conf("dataset_name", default=None)
         self.overwrite: bool = self.get_conf("overwrite", default=False)
         self.min_score: int = int(self.get_conf("min_score", default=0))
+        self.verify_ssl: bool = str(
+            self.get_conf("verify_ssl", default="true")
+        ).lower() not in ("false", "0", "no", "off")
 
         # Where to write the dataset.  Defaults to the same root the UI watches.
         default_datasets_root = os.path.join(TOOLKIT_ROOT, "datasets")
@@ -90,7 +93,9 @@ class PixlStashFetchProcess(BaseExtensionProcess):
         from extensions.pixlstash.pixlstash_client import PixlStashClient
 
         print(f"\n[PixlStash] Connecting to {self.pixlstash_url} …")
-        client = PixlStashClient(self.pixlstash_url, self.pixlstash_token)
+        client = PixlStashClient(
+            self.pixlstash_url, self.pixlstash_token, verify_ssl=self.verify_ssl
+        )
         client.login()
         print("[PixlStash] Authenticated.")
 
@@ -105,7 +110,10 @@ class PixlStashFetchProcess(BaseExtensionProcess):
             pictures = client.list_pictures_for_set(self.source_id)
 
         total = len(pictures)
-        print(f"[PixlStash] Fetched {source_label} — {total} picture(s) found in source.", flush=True)
+        print(
+            f"[PixlStash] Fetched {source_label} — {total} picture(s) found in source.",
+            flush=True,
+        )
 
         # ---- apply score filter ------------------------------------------
         if self.min_score > 0:
@@ -119,7 +127,10 @@ class PixlStashFetchProcess(BaseExtensionProcess):
                 flush=True,
             )
 
-        print(f"[PixlStash] Downloading {source_label} — {total} picture(s) found.", flush=True)
+        print(
+            f"[PixlStash] Downloading {source_label} — {total} picture(s) found.",
+            flush=True,
+        )
 
         # ---- resolve output folder ----------------------------------------
         dataset_name = self.dataset_name or self._safe_folder_name(source["name"])
@@ -139,7 +150,11 @@ class PixlStashFetchProcess(BaseExtensionProcess):
             img_path = os.path.join(output_folder, img_filename)
             txt_path = os.path.join(output_folder, txt_filename)
 
-            if not self.overwrite and os.path.exists(img_path) and os.path.exists(txt_path):
+            if (
+                not self.overwrite
+                and os.path.exists(img_path)
+                and os.path.exists(txt_path)
+            ):
                 skipped += 1
                 print(f"PROGRESS:{downloaded + skipped}/{total}", flush=True)
                 continue
@@ -169,6 +184,7 @@ class PixlStashFetchProcess(BaseExtensionProcess):
                     # Convert to JPEG via PIL so AI-Toolkit doesn't have to
                     import io
                     from PIL import Image
+
                     pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     pil_img.save(img_path, format="JPEG", quality=95)
 
@@ -180,7 +196,10 @@ class PixlStashFetchProcess(BaseExtensionProcess):
                 print(f"PROGRESS:{downloaded + skipped}/{total}", flush=True)
 
             except Exception as exc:
-                print(f"\n[PixlStash] WARNING: Failed to fetch picture id={pic_id}: {exc}", flush=True)
+                print(
+                    f"\n[PixlStash] WARNING: Failed to fetch picture id={pic_id}: {exc}",
+                    flush=True,
+                )
                 errors += 1
                 print(f"PROGRESS:{downloaded + skipped}/{total}", flush=True)
 
@@ -189,9 +208,7 @@ class PixlStashFetchProcess(BaseExtensionProcess):
             f"\n[PixlStash] Done — {downloaded} downloaded, "
             f"{skipped} skipped (already on disk), {errors} errors."
         )
-        print(
-            f"[PixlStash] Dataset '{dataset_name}' is ready in the AI-Toolkit UI."
-        )
+        print(f"[PixlStash] Dataset '{dataset_name}' is ready in the AI-Toolkit UI.")
 
     # ------------------------------------------------------------------
 

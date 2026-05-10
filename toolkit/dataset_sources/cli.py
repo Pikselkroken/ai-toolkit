@@ -57,7 +57,9 @@ def cmd_plugins() -> None:
         {
             "id": cls.type_id,
             "display_name": cls.display_name,
-            "settings_schema": [dataclasses.asdict(f) for f in cls.get_settings_schema()],
+            "settings_schema": [
+                dataclasses.asdict(f) for f in cls.get_settings_schema()
+            ],
         }
         for cls in get_all_sources()
     ]
@@ -132,10 +134,14 @@ def cmd_thumbnail(source_id: str, thumbnail_id: str, thumbnail_type: str) -> Non
 
     try:
         image_bytes, content_type = source.get_thumbnail(thumbnail_id, thumbnail_type)
-        print(json.dumps({
-            "content_type": content_type,
-            "data": base64.b64encode(image_bytes).decode("ascii"),
-        }))
+        print(
+            json.dumps(
+                {
+                    "content_type": content_type,
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                }
+            )
+        )
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))
         sys.exit(1)
@@ -202,10 +208,6 @@ if __name__ == "__main__":
             )
             sys.exit(1)
         cmd_job_config(sys.argv[2])
-    else:
-        print(f"Unknown command: {cmd}", file=sys.stderr)
-        sys.exit(1)
-        cmd_browse(sys.argv[2])
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)

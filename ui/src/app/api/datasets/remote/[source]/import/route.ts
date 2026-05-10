@@ -125,8 +125,10 @@ export async function POST(
       });
 
       let currentTotal = 0;
+      const errorLines: string[] = [];
 
-      const processLine = (line: string) => {
+      const processLine = (line: string, isStderr: boolean) => {
+        if (isStderr) errorLines.push(line);
         const progressMatch = line.match(/^PROGRESS:(\d+)\/(\d+)$/);
         if (progressMatch) {
           currentTotal = parseInt(progressMatch[2]);
@@ -150,14 +152,13 @@ export async function POST(
         }
       };
 
-      readline.createInterface({ input: child.stdout! }).on('line', processLine);
-      readline.createInterface({ input: child.stderr! }).on('line', processLine);
+      readline.createInterface({ input: child.stdout! }).on('line', line => processLine(line, false));
+      readline.createInterface({ input: child.stderr! }).on('line', line => processLine(line, true));
 
       child.on('close', code => {
         if (code !== 0) {
-          controller.enqueue(
-            sseEvent('error', { message: `Process exited with code ${code}` }),
-          );
+          const errMsg = errorLines.slice(-10).join('\n').trim() || `Process exited with code ${code}`;
+          controller.enqueue(sseEvent('error', { message: errMsg }));
         }
         controller.close();
       });

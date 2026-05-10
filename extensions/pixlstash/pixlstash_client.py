@@ -2,19 +2,22 @@
 PixlStash API client — corrected against live API (v1.0.0b3).
 
 Key endpoint notes (verified from /redoc):
-  - Picture sets:    /picture_sets/{id}  (underscore, not hyphen)
-  - Picture file:    /pictures/{id}.{ext}  (not /pictures/{id}/image.{ext})
-  - Thumbnail:       /pictures/thumbnails/{id}.webp
-  - Set members:     /picture_sets/{id}/members  -> returns integer IDs only
-  - Char pictures:   /pictures/list?character_id={id}
-  - Login:           POST /login  {"token": "..."}
+  - Base prefix:     /api/v1
+  - Picture sets:    /api/v1/picture_sets/{id}  (underscore, not hyphen)
+  - Picture file:    /api/v1/pictures/{id}.{ext}
+  - Thumbnail:       /api/v1/pictures/thumbnails/{id}.webp
+  - Set members:     /api/v1/picture_sets/{id}/members  -> returns integer IDs only
+  - Char pictures:   /api/v1/pictures/list?character_id={id}
+  - Auth:            Authorization: Bearer <token> header on all requests
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import List, Optional
 
 import requests
+import urllib3
 
 _EMPTY_TAG_SENTINEL = ""
 
@@ -26,37 +29,25 @@ class PixlStashError(RuntimeError):
 class PixlStashClient:
     """Thin wrapper around the PixlStash REST API."""
 
-    def __init__(self, base_url: str, token: str) -> None:
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str, token: str, verify_ssl: bool = True) -> None:
+        self.base_url = base_url.rstrip("/") + "/api/v1"
         self.token = token
         self._session = requests.Session()
-        self._authenticated = False
-
-    # ------------------------------------------------------------------
-    # Authentication
-    # ------------------------------------------------------------------
+        self._session.verify = verify_ssl
+        self._session.headers.update({"Authorization": f"Bearer {token}"})
+        if not verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     def login(self) -> None:
-        """Exchange the API token for a session cookie."""
-        r = self._session.post(
-            f"{self.base_url}/login",
-            json={"token": self.token},
-            timeout=30,
-        )
-        if not r.ok:
-            raise PixlStashError(
-                f"Login failed ({r.status_code}): {r.text[:200]}"
-            )
-        self._authenticated = True
+        """No-op: authentication is handled via Bearer token header."""
+        pass
 
     def _get(self, path: str, **params) -> requests.Response:
-        if not self._authenticated:
-            raise PixlStashError("Call login() before making API requests.")
-        r = self._session.get(f"{self.base_url}{path}", params=params or None, timeout=60)
+        r = self._session.get(
+            f"{self.base_url}{path}", params=params or None, timeout=60
+        )
         if not r.ok:
-            raise PixlStashError(
-                f"GET {path} failed ({r.status_code}): {r.text[:200]}"
-            )
+            raise PixlStashError(f"GET {path} failed ({r.status_code}): {r.text[:200]}")
         return r
 
     # ------------------------------------------------------------------
@@ -78,7 +69,7 @@ class PixlStashClient:
 
     def get_picture_set(self, set_id: int) -> dict:
         """Return picture set metadata."""
-        return self._get(f"/picture_sets/{set_id}", info=True).json()
+        return self._get(f"/picture_sets/{set_id}").json()["set"]
 
     def list_picture_sets(self) -> List[dict]:
         """Return all non-reference picture sets."""
@@ -88,34 +79,45 @@ class PixlStashClient:
         # as training datasets.
         return [s for s in all_sets if s.get("reference_character") is None]
 
-    def get_picture_set_member_ids(self, set_id: int) -> List[int]:
-        """Return the list of picture IDs belonging to a set."""
-        # Response shape: {"picture_ids": [...]}
-        return self._get(f"/picture_sets/{set_id}/members").json()["picture_ids"]
+    def list_pictures_for_set(self, set_id: int) -> List[dict]:
+        """
+        Return full picture metadata records for every member of a set.
+        Uses a single GET /picture_sets/{id} call which embeds all pictures.
+        """
+        return self._get(f"/picture_sets/{set_id}").json()["pictures"]
 
     # ------------------------------------------------------------------
     # Picture listing
     # ------------------------------------------------------------------
 
     def list_pictures_for_character(self, character_id: int) -> List[dict]:
-        """Return all pictures where this character appears."""
-        # GET /pictures?character_id={id} returns full picture objects
-        return self._get("/pictures", character_id=character_id).json()
+        """Return all pictures where this character appears, with tags merged in."""
+        pictures = self._get("/pictures", character_id=character_id).json()
+        return self._merge_tags(pictures)
 
     def list_pictures_for_set(self, set_id: int) -> List[dict]:
         """
-        Return full picture metadata records for every member of a set.
-        The members endpoint returns IDs only, so we fetch metadata for each.
+        Return full picture objects for every member of a set, with tags merged in.
+        Uses a single GET /picture_sets/{id} call which embeds all pictures.
         """
-        pic_ids: List[int] = self.get_picture_set_member_ids(set_id)
-        return [self.get_picture_metadata(pid) for pid in pic_ids]
+        pictures = self._get(f"/picture_sets/{set_id}").json()["pictures"]
+        return self._merge_tags(pictures)
 
-    def get_picture_metadata(self, pic_id: int) -> dict:
-        return self._get(f"/pictures/{pic_id}/metadata").json()
-
-    # ------------------------------------------------------------------
-    # Image download
-    # ------------------------------------------------------------------
+    def _merge_tags(self, pictures: List[dict]) -> List[dict]:
+        """Bulk-fetch tags for a list of pictures and merge them in-place."""
+        if not pictures:
+            return pictures
+        pic_ids = [p["id"] for p in pictures]
+        r = self._session.post(
+            f"{self.base_url}/pictures/tags/bulk_fetch",
+            json={"picture_ids": pic_ids},
+            timeout=60,
+        )
+        if r.ok:
+            tags_by_id = {item["id"]: item.get("tags", []) for item in r.json()}
+            for pic in pictures:
+                pic.setdefault("tags", tags_by_id.get(pic["id"], []))
+        return pictures
 
     def download_image_bytes(self, pic_id: int, fmt: str = "jpg") -> bytes:
         """Return raw image bytes. Endpoint: GET /pictures/{id}.{ext}"""
@@ -185,7 +187,9 @@ class PixlStashClient:
 
         content_count = len(parts) - (1 if trigger else 0)
         if content_count == 0:
-            fallback = (meta.get("description") or "").strip() or cls.tags_to_string(meta)
+            fallback = (meta.get("description") or "").strip() or cls.tags_to_string(
+                meta
+            )
             if fallback:
                 parts.append(fallback)
 

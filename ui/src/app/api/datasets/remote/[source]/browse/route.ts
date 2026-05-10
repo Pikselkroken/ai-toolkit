@@ -50,9 +50,16 @@ export async function GET(
 
     child.on('close', code => {
       if (code !== 0) {
+        // CLI may write {"error": "..."} to stdout even on non-zero exit
+        let pluginError: string | undefined;
+        try {
+          const parsed = JSON.parse(out);
+          if (parsed?.error) pluginError = parsed.error;
+        } catch { /* ignore */ }
+        const msg = pluginError || err.trim() || 'unknown error';
         resolve(
           NextResponse.json(
-            { error: `Browse failed for "${source}": ${err.trim() || 'unknown error'}` },
+            { error: `Browse failed for "${source}": ${msg}` },
             { status: 502 },
           ),
         );

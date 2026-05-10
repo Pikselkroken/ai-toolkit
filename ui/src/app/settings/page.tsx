@@ -40,8 +40,8 @@ export default function Settings() {
   }, []);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    setValues(prev => ({ ...prev, [name]: value }));
+    const { name, type, value, checked } = e.target;
+    setValues(prev => ({ ...prev, [name]: type === 'checkbox' ? (checked ? 'true' : 'false') : value }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -140,21 +140,42 @@ export default function Settings() {
                       <div className="space-y-4">
                         {plugin.settings_schema.map(field => (
                           <div key={field.key}>
-                            <label htmlFor={field.key} className="block text-sm font-medium mb-2">
-                              {field.label}
-                              {field.description && (
-                                <div className="text-gray-500 text-sm ml-1">{field.description}</div>
-                              )}
-                            </label>
-                            <input
-                              type={field.input_type}
-                              id={field.key}
-                              name={field.key}
-                              value={values[field.key] ?? ''}
-                              onChange={handleChange}
-                              className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-gray-600 focus:border-transparent"
-                              placeholder={field.placeholder}
-                            />
+                            {field.input_type === 'checkbox' ? (
+                              <label className="flex items-center gap-3 text-sm font-medium cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  id={field.key}
+                                  name={field.key}
+                                  checked={(values[field.key] ?? 'true') !== 'false'}
+                                  onChange={handleChange}
+                                  className="w-4 h-4 rounded border-gray-700 bg-gray-800 accent-blue-500"
+                                />
+                                <span>
+                                  {field.label}
+                                  {field.description && (
+                                    <div className="text-gray-500 text-sm">{field.description}</div>
+                                  )}
+                                </span>
+                              </label>
+                            ) : (
+                              <>
+                                <label htmlFor={field.key} className="block text-sm font-medium mb-2">
+                                  {field.label}
+                                  {field.description && (
+                                    <div className="text-gray-500 text-sm ml-1">{field.description}</div>
+                                  )}
+                                </label>
+                                <input
+                                  type={field.input_type}
+                                  id={field.key}
+                                  name={field.key}
+                                  value={values[field.key] ?? ''}
+                                  onChange={handleChange}
+                                  className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-gray-600 focus:border-transparent"
+                                  placeholder={field.placeholder}
+                                />
+                              </>
+                            )}
                           </div>
                         ))}
                       </div>
