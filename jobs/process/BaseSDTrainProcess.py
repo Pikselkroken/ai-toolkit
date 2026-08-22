@@ -153,6 +153,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.train_config.cache_text_embeddings:
             for raw_dataset in raw_datasets:
                 raw_dataset['cache_text_embeddings'] = True
+
+        # pass diff output preservation to the datasets so the data loader can build
+        # and cache the DOP caption (dataset trigger word replaced with the class)
+        if self.train_config.diff_output_preservation and raw_datasets is not None:
+            for raw_dataset in raw_datasets:
+                raw_dataset['diff_output_preservation'] = True
+                raw_dataset['diff_output_preservation_class'] = self.train_config.diff_output_preservation_class
         
         if raw_datasets is not None and len(raw_datasets) > 0:
             for raw_dataset in raw_datasets:
@@ -2566,15 +2573,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         except StopIteration:
                             with self.timer('reset_batch:reg'):
                                 # hit the end of an epoch, reset
-                                if self.progress_bar is not None:
-                                    self.progress_bar.pause()
                                 dataloader_iterator_reg = iter(dataloader_reg)
                                 trigger_dataloader_setup_epoch(dataloader_reg)
 
                             with self.timer('get_batch:reg'):
                                 batch = next(dataloader_iterator_reg)
-                            if self.progress_bar is not None:
-                                self.progress_bar.unpause()
                         is_reg_step = True
                     elif dataloader is not None:
                         try:
@@ -2583,8 +2586,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         except StopIteration:
                             with self.timer('reset_batch'):
                                 # hit the end of an epoch, reset
-                                if self.progress_bar is not None:
-                                    self.progress_bar.pause()
                                 dataloader_iterator = iter(dataloader)
                                 trigger_dataloader_setup_epoch(dataloader)
                                 self.epoch_num += 1
@@ -2594,8 +2595,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     self.grad_accumulation_step = 0
                             with self.timer('get_batch'):
                                 batch = next(dataloader_iterator)
-                            if self.progress_bar is not None:
-                                self.progress_bar.unpause()
                     else:
                         batch = None
                     batch_list.append(batch)
@@ -2741,8 +2740,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             self.progress_bar.unpause()
 
                     if self.logging_config.log_every and self.step_num % self.logging_config.log_every == 0:
-                        if self.progress_bar is not None:
-                            self.progress_bar.pause()
                         with self.timer('log_to_tensorboard'):
                             # log to tensorboard
                             if self.accelerator.is_main_process:
@@ -2751,9 +2748,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                         for key, value in loss_dict.items():
                                             self.writer.add_scalar(f"{key}", value, self.step_num)
                                         self.writer.add_scalar(f"lr", learning_rate, self.step_num)
-                                if self.progress_bar is not None:
-                                    self.progress_bar.unpause()
-                        
+
                         if self.accelerator.is_main_process:
                             # log to logger
                             self.logger.log({
@@ -2789,22 +2784,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
 
                     if self.performance_log_every > 0 and self.step_num % self.performance_log_every == 0:
-                        if self.progress_bar is not None:
-                            self.progress_bar.pause()
                         # print the timers and clear them
                         self.timer.print()
                         self.timer.reset()
-                        if self.progress_bar is not None:
-                            self.progress_bar.unpause()
                 
                 # commit log
                 if self.accelerator.is_main_process:
                     with self.timer('commit_logger'):
                         self.logger.commit(step=self.step_num)
 
-                # sets progress bar to match out step
+                # sets progress bar to match our step (step is complete, so completed count is step + 1)
                 if self.progress_bar is not None:
-                    self.progress_bar.update(step - self.progress_bar.n)
+                    self.progress_bar.update(step + 1 - self.progress_bar.n)
 
                 #############################
                 # End of step
