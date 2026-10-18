@@ -9,7 +9,9 @@ import av
             
 from toolkit import image_utils
 from toolkit.basic import get_quick_signature_string
+from toolkit.dto import DTO
 from toolkit.dataloader_mixins import (
+    _latent_from_uint8,
     CaptionProcessingDTOMixin,
     ImageProcessingDTOMixin,
     LatentCachingFileItemDTOMixin,
@@ -75,6 +77,8 @@ class FileItemDTO(
             if _sd is not None and hasattr(_sd, "get_frame_count_snapper")
             else None
         )
+        # models with an RGBA VAE want the alpha channel loaded and encoded
+        self.load_rgba = _sd is not None and _sd.load_rgba
         size_database = kwargs.get("size_database", {})
         dataset_root = kwargs.get("dataset_root", None)
         self.encode_control_in_text_embeddings = kwargs.get(
@@ -83,9 +87,13 @@ class FileItemDTO(
         self.encode_first_frame_in_text_embeddings = kwargs.get(
             "encode_first_frame_in_text_embeddings", False
         )
+        # D-OPSD: also cache teacher embeds with the item's own media as reference 1
+        self.dopsd_self_ref = kwargs.get("dopsd_self_ref", False)
         self.te_padding_side = kwargs.get("te_padding_side", "right")
         self.latent_space_version = kwargs.get("latent_space_version", "sd1")
         self.text_embedding_space_version = kwargs.get("text_embedding_space_version", "sd1")
+        # model sizes references against the item's bucket, so the cache key must carry it
+        self.text_embedding_uses_target_size = kwargs.get("text_embedding_uses_target_size", False)
         if dataset_root is not None:
             # remove dataset root from path
             file_key = self.path.replace(dataset_root, "")
@@ -205,13 +213,34 @@ class FileItemDTO(
         self.cleanup_mask()
         self.cleanup_unconditional()
 
+    @property
+    def tensor(self) -> Union[torch.Tensor, None]:
+        t = self.__dict__.get('_tensor')
+        if t is None:
+            cached = getattr(self, '_cached_tensor_uint8', None)
+            if cached is not None:
+                # cached pixels stay uint8 until first read, so workers ship 1 byte/px over shm;
+                # fp16 on read (consumers cast up themselves)
+                t = _latent_from_uint8(cached, dtype=torch.float16)
+                self._tensor = t
+        return t
+
+    @tensor.setter
+    def tensor(self, value):
+        self._tensor = value
+
+    @tensor.deleter
+    def tensor(self):
+        self._tensor = None
+
 
 class DataLoaderBatchDTO:
     def __init__(self, **kwargs):
         try:
             self.file_items: List["FileItemDTO"] = kwargs.get("file_items", None)
             is_latents_cached = self.file_items[0].is_latent_cached
-            self.tensor: Union[torch.Tensor, None] = None
+            self._tensor: Union[torch.Tensor, None] = None
+            self._tensor_uint8: Union[torch.Tensor, None] = None
             self.latents: Union[torch.Tensor, None] = None
             self.control_tensor: Union[torch.Tensor, None] = None
             self.control_tensor_list: Union[List[List[torch.Tensor]], None] = None
@@ -237,7 +266,6 @@ class DataLoaderBatchDTO:
             )
             self.audio_tensor: Union[torch.Tensor, None] = None
             self.first_frame_latents: Union[torch.Tensor, None] = None
-            self.audio_latents: Union[torch.Tensor, None] = None
             # control-video reference paths (encoded + disk-cached lazily by
             # models with supports_video_control_images)
             self.control_video_paths_list: Union[List, None] = None
@@ -247,28 +275,8 @@ class DataLoaderBatchDTO:
                     for x in self.file_items
                 ]
 
-            # just for holding noise and preds during training
-            self.audio_target: Union[torch.Tensor, None] = None
-            self.audio_pred: Union[torch.Tensor, None] = None
-            # the noise drawn for the audio stream on the primary (grad enabled)
-            # prediction. Secondary passes (cfg / guidance loss / prior preds)
-            # reuse it so their noisy audio matches the stored audio_target.
-            self.audio_noise: Union[torch.Tensor, None] = None
-            # audio predictions from the non primary passes. Kept separate so
-            # they cannot stomp the primary pred we backprop through.
-            self.audio_pred_uncond: Union[torch.Tensor, None] = None
-            self.audio_pred_prior: Union[torch.Tensor, None] = None
-            self.audio_pred_preservation: Union[torch.Tensor, None] = None
-            # which of the above the current secondary pass writes to. None (the
-            # default) means no secondary pass is in flight: any grad-enabled
-            # prediction is a primary one and writes audio_pred (and the
-            # noisy/sigma bookkeeping) directly. The trainer sets this around
-            # its prior / guidance-unconditional / preservation passes.
-            self.audio_pred_slot: Union[str, None] = None
-            # noisy audio rows and audio sigma of the primary pass, used to
-            # rebuild the clean audio estimate for perceptual losses
-            self.audio_noisy: Union[torch.Tensor, None] = None
-            self.audio_sigma: Union[torch.Tensor, None] = None
+            # set by the trainer around the D-OPSD teacher pass
+            self.dopsd_teacher_pass: bool = False
 
             self.num_frames: int = self.file_items[0].num_frames
 
@@ -279,16 +287,17 @@ class DataLoaderBatchDTO:
             ):
                 # only return a tensor if latents are not cached, or if we are explicitly
                 # loading the raw image alongside the cached latents
-                self.tensor: torch.Tensor = torch.cat(
-                    [x.tensor.unsqueeze(0) for x in self.file_items]
-                )
+                if all(x.__dict__.get('_tensor') is None and getattr(x, '_cached_tensor_uint8', None) is not None for x in self.file_items):
+                    # cached pixels cross the worker boundary as uint8; `tensor` expands them on first read
+                    self._tensor_uint8 = torch.cat([x._cached_tensor_uint8.unsqueeze(0) for x in self.file_items])
+                else:
+                    self.tensor = torch.cat([x.tensor.unsqueeze(0) for x in self.file_items])
             # if we have encoded latents, we concatenate them
             self.latents: Union[torch.Tensor, None] = None
             if is_latents_cached:
-                # this get_latent call with trigger loading all cached items from the disk
-                self.latents = torch.cat(
-                    [x.get_latent().unsqueeze(0) for x in self.file_items]
-                )
+                # this get_latent call with trigger loading all cached items from the disk.
+                # DTO.stack keeps any extra streams (audio, ...) riding on the batch latents
+                self.latents = DTO.stack([x.get_latent() for x in self.file_items])
                 if any(
                     [x._cached_first_frame_latent is not None for x in self.file_items]
                 ):
@@ -306,25 +315,11 @@ class DataLoaderBatchDTO:
                             for x in self.file_items
                         ]
                     )
-                if any([x._cached_audio_latent is not None for x in self.file_items]):
-                    # find one to use as a base; item 0 may not have one
-                    base_audio_latent = None
-                    for x in self.file_items:
-                        if x._cached_audio_latent is not None:
-                            base_audio_latent = x._cached_audio_latent
-                            break
-                    self.audio_latents = torch.cat(
-                        [
-                            x._cached_audio_latent.unsqueeze(0)
-                            if x._cached_audio_latent is not None
-                            else torch.zeros_like(base_audio_latent).unsqueeze(0)
-                            for x in self.file_items
-                        ]
-                    )
-
             self.prompt_embeds: Union[PromptEmbeds, None] = None
             # diff output preservation embeds (trigger word replaced with class)
             self.dop_prompt_embeds: Union[PromptEmbeds, None] = None
+            # D-OPSD teacher embeds (trigger word replaced with the self-reference token)
+            self.dopsd_prompt_embeds: Union[PromptEmbeds, None] = None
             # if self.file_items[0].control_tensor is not None:
             # if any have a control tensor, we concatenate them
             if any([x.control_tensor is not None for x in self.file_items]):
@@ -517,6 +512,24 @@ class DataLoaderBatchDTO:
 
                 self.dop_prompt_embeds = concat_prompt_embeds(dop_prompt_embeds_list, padding_side=padding_side)
 
+            if any([getattr(x, 'dopsd_prompt_embeds', None) is not None for x in self.file_items]):
+                # find one to use as a base
+                base_dopsd_prompt_embeds = None
+                for x in self.file_items:
+                    if x.dopsd_prompt_embeds is not None:
+                        base_dopsd_prompt_embeds = x.dopsd_prompt_embeds
+                        break
+                dopsd_prompt_embeds_list = []
+                for x in self.file_items:
+                    if x.dopsd_prompt_embeds is None:
+                        y = base_dopsd_prompt_embeds
+                    else:
+                        y = x.dopsd_prompt_embeds
+                    dopsd_prompt_embeds_list.append(y)
+                padding_side = self.file_items[0].te_padding_side
+
+                self.dopsd_prompt_embeds = concat_prompt_embeds(dopsd_prompt_embeds_list, padding_side=padding_side)
+
             if any([x.audio_tensor is not None for x in self.file_items]):
                 # find one to use as a base
                 base_audio_tensor = None
@@ -552,14 +565,48 @@ class DataLoaderBatchDTO:
     ):
         return [x.caption_short for x in self.file_items]
 
-    def set_secondary_audio_pred(self, pred):
-        """Route an audio prediction from a non primary pass (prior,
-        unconditional/guidance, preservation) to its own slot so it cannot
-        stomp the primary prediction the loss backprops through. Passes that
-        did not declare a slot (e.g. a trainer's extra no_grad prediction)
-        are simply not stored."""
-        if self.audio_pred_slot is not None:
-            setattr(self, self.audio_pred_slot, pred)
+    @property
+    def latents(self) -> Union[torch.Tensor, None]:
+        return self._latents
+
+    @latents.setter
+    def latents(self, value):
+        # math on a DTO returns a plain tensor, so trainer code that rescales
+        # or re-noises the latents would silently drop the extra streams
+        # (audio, ...) riding on them. Re-attach them here so assignments stay
+        # plain tensor code everywhere else.
+        prev = getattr(self, '_latents', None)
+        if isinstance(prev, DTO) and value is not None and not isinstance(value, DTO):
+            value = DTO(value, **prev.extras)
+        self._latents = value
+
+    @latents.deleter
+    def latents(self):
+        self._latents = None
+
+    @property
+    def tensor(self) -> Union[torch.Tensor, None]:
+        if self._tensor is None and self._tensor_uint8 is not None:
+            self._tensor = _latent_from_uint8(self._tensor_uint8, dtype=torch.float16)
+            self._tensor_uint8 = None
+        return self._tensor
+
+    @tensor.setter
+    def tensor(self, value):
+        self._tensor = value
+        self._tensor_uint8 = None
+
+    @tensor.deleter
+    def tensor(self):
+        self._tensor = None
+        self._tensor_uint8 = None
+
+    @property
+    def audio_latents(self) -> Union[torch.Tensor, None]:
+        # cached audio rides inside the latents DTO
+        if isinstance(self.latents, DTO):
+            return self.latents.get('audio')
+        return None
 
     def cleanup(self):
         del self.latents
@@ -567,16 +614,7 @@ class DataLoaderBatchDTO:
         del self.control_tensor
         del self.audio_tensor
         del self.audio_data
-        del self.audio_target
-        del self.audio_pred
-        del self.audio_noise
-        del self.audio_pred_uncond
-        del self.audio_pred_prior
-        del self.audio_pred_preservation
-        del self.audio_noisy
-        del self.audio_sigma
         del self.first_frame_latents
-        del self.audio_latents
         for file_item in self.file_items:
             file_item.cleanup()
 
